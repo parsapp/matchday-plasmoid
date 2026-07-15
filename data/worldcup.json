@@ -1,0 +1,13 @@
+{
+  "league": "Dünya Kupası 2026",
+  "updated": "2026-07-16",
+  "matches": [
+    { "home": "İspanya",   "away": "Belçika",   "score": "2 - 1", "info": "Çeyrek Final · 10 Tem" },
+    { "home": "Norveç",    "away": "İngiltere", "score": "1 - 2", "info": "Çeyrek Final · 12 Tem" },
+    { "home": "Arjantin",  "away": "İsviçre",   "score": "3 - 1", "info": "Çeyrek Final · 12 Tem" },
+    { "home": "Fransa",    "away": "İspanya",   "score": "0 - 2", "info": "Yarı Final · 14 Tem" },
+    { "home": "İngiltere", "away": "Arjantin",  "score": "1 - 2", "info": "Yarı Final · 15 Tem" },
+    { "home": "Fransa",    "away": "İngiltere", "score": "–",     "info": "Üçüncülük · 19 Tem 00:00" },
+    { "home": "İspanya",   "away": "Arjantin",  "score": "–",     "info": "FİNAL · 19 Tem 22:00" }
+  ]
+}
