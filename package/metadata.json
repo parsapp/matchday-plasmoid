@@ -1,0 +1,13 @@
+{
+    "KPlugin": {
+        "Authors": [{ "Name": "Pars APP" }],
+        "Category": "Utilities",
+        "Description": "Fixtures and results, one league at a time",
+        "Icon": "games-highscores",
+        "Id": "com.parsapp.matchday",
+        "Name": "Matchday",
+        "Version": "0.1"
+    },
+    "KPackageStructure": "Plasma/Applet",
+    "X-Plasma-API-Minimum-Version": "6.0"
+}
