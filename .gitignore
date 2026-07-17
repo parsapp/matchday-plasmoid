@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.pyc
+
+# Feed producer scratch
+data/*.tmp
+
+# Build artifacts
+*.plasmoid
