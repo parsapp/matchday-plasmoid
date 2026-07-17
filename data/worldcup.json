@@ -1,6 +1,7 @@
 {
   "league": "Dünya Kupası 2026",
-  "updated": "2026-07-16",
+  "updated": "2026-07-17",
+  "next": "Final · Paz 22:00",
   "matches": [
     { "home": "İspanya",   "away": "Belçika",   "score": "2 - 1", "info": "Çeyrek Final · 10 Tem" },
     { "home": "Norveç",    "away": "İngiltere", "score": "1 - 2", "info": "Çeyrek Final · 12 Tem" },
