@@ -8,6 +8,7 @@ PlasmoidItem {
 
     property string dataUrl: "https://raw.githubusercontent.com/parsapp/pars-plasmoid/main/data/worldcup.json"
     property string title: "Yükleniyor..."
+    property string nextText: ""
 
     ListModel { id: matchModel }
 
@@ -19,6 +20,7 @@ PlasmoidItem {
             try {
                 const data = JSON.parse(xhr.responseText)
                 root.title = "⚽ " + data.league
+                root.nextText = data.next ? data.next : ""
                 matchModel.clear()
                 for (const m of data.matches) {
                     matchModel.append({ home: m.home, away: m.away, score: m.score, info: m.info })
@@ -31,6 +33,20 @@ PlasmoidItem {
 
     Component.onCompleted: refresh()
     Timer { interval: 1800000; running: true; repeat: true; onTriggered: root.refresh() }
+
+    compactRepresentation: MouseArea {
+        implicitWidth: compactRow.implicitWidth + 12
+        implicitHeight: compactRow.implicitHeight
+        onClicked: root.expanded = !root.expanded
+
+        RowLayout {
+            id: compactRow
+            anchors.centerIn: parent
+            spacing: 4
+            PC3.Label { text: "⚽" }
+            PC3.Label { text: root.nextText; visible: root.nextText !== "" }
+        }
+    }
 
     fullRepresentation: ColumnLayout {
         spacing: 8
