@@ -1,5 +1,7 @@
 # Pars — football fixtures & results widget for KDE Plasma 6
 
+<img src="branding/final/logo-256.png" alt="Pars logo" width="200">
+
 A minimal plasmoid that shows recent results and upcoming fixtures for one competition at a time. Currently tracking the **2026 FIFA World Cup**.
 
 ![Pars widget](screenshots/main.png)
