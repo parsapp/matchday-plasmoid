@@ -16,6 +16,8 @@ The widget is intentionally dumb: it fetches a single static JSON file over HTTP
 
 The feed currently lives in this repo and is served via GitHub raw (`data/worldcup.json`), refreshed by the widget every 30 minutes.
 
+On the producer side, `producer/update_feed.py` merges live results from the free [TheSportsDB](https://www.thesportsdb.com) API into the curated bracket and pushes on change (a systemd timer runs it every 10 minutes). Scores are **near-live**: the free API tier does not stream in-play scores, so a match result typically appears shortly after full-time rather than minute-by-minute.
+
 ## Feed schema
 
 ```json

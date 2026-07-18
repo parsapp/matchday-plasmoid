@@ -1,16 +1,26 @@
 #!/usr/bin/env python3
-"""Pars feed producer.
+"""Pars feed producer — MERGE mode.
 
-Pulls the latest results + upcoming matches for the FIFA World Cup from the
-free TheSportsDB v1 API and writes them into data/worldcup.json in the Pars
-schema. If the feed content actually changed, it commits and pushes.
+Keeps the curated match bracket in data/worldcup.json as the static source of
+truth and only *merges* live facts from the free TheSportsDB v1 API into it:
+
+  * a finished API result fills the score of the matching curated row
+    ("–" -> "H - A"); it never rewrites round labels or reorders history,
+  * the API's next fixture refreshes the top-level "next" line (and is
+    appended as a new row only if it is genuinely absent from the bracket).
+
+Matching is by team name, mapping the API's English names to our Turkish ones
+(Spain=İspanya, Argentina=Arjantin, France=Fransa, England=İngiltere, ...).
 
 Design rules:
 - Single official source: TheSportsDB v1 (free test key "123"). No scraping.
+- Never regenerate from scratch: the curated bracket must already exist.
 - Fail loud: on any network / parse error the script raises and exits non-zero
-  WITHOUT touching the existing JSON (no partial / corrupt writes).
-- Idempotent commits: only commit+push when the meaningful feed content
-  (league / next / matches) differs from what's already on disk.
+  WITHOUT touching the existing JSON (atomic temp+rename, no partial writes).
+- Commit+push only when the merged content actually changed.
+
+Note: on the free tier live scores are not streamed; a result typically lands
+shortly after full-time (see README, "near-live").
 """
 
 import json
@@ -18,7 +28,6 @@ import os
 import subprocess
 import sys
 import urllib.request
-import urllib.error
 from datetime import datetime, timezone, timedelta
 
 # ----------------------------------------------------------------------------
@@ -29,8 +38,6 @@ LEAGUE_ID = "4429"                    # FIFA World Cup
 LEAGUE_TITLE = "Dünya Kupası 2026"    # widget title (feed "league" field)
 BASE = f"https://www.thesportsdb.com/api/v1/json/{API_KEY}"
 TIMEOUT = 20                          # seconds per request
-MAX_PAST = 8                          # most recent finished matches to keep
-MAX_NEXT = 4                          # upcoming matches to keep
 TR = timezone(timedelta(hours=3))     # Turkey time (UTC+3, no DST)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -40,18 +47,12 @@ TR_MONTHS = ["", "Oca", "Şub", "Mar", "Nis", "May", "Haz",
              "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"]
 TR_DAYS = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"]
 
-# Round labels keyed by intRound (TheSportsDB soccer coding, best-effort).
-ROUND_TR = {
-    1: "Grup", 2: "Grup", 3: "Grup",
-    125: "Final",
-    150: "Yarı Final",
-    160: "Çeyrek Final",
-    170: "Son 16",
-    180: "Son 32",
-    200: "Son 16",
-}
+# Round labels keyed by intRound (TheSportsDB soccer coding) — only used when
+# appending a genuinely new fixture; curated rows keep their own labels.
+ROUND_TR = {1: "Grup", 2: "Grup", 3: "Grup", 125: "Final", 150: "Yarı Final",
+            160: "Çeyrek Final", 170: "Son 16", 180: "Son 32", 200: "Son 16"}
 
-# Nation name -> Turkish. Falls back to the API's English name if missing.
+# API English nation name -> our Turkish name. Falls back to the API name.
 TR_COUNTRIES = {
     "Argentina": "Arjantin", "Australia": "Avustralya", "Austria": "Avusturya",
     "Belgium": "Belçika", "Bosnia-Herzegovina": "Bosna-Hersek", "Brazil": "Brezilya",
@@ -75,10 +76,6 @@ TR_COUNTRIES = {
     "United States": "ABD", "USA": "ABD", "Uruguay": "Uruguay", "Wales": "Galler",
 }
 
-# Status buckets
-FINISHED = {"FT", "AET", "PEN", "Match Finished", "FT_PEN"}
-NOT_STARTED = {"NS", "", None, "Not Started", "TBD"}
-
 
 # ----------------------------------------------------------------------------
 # Helpers
@@ -98,11 +95,11 @@ def fetch(path):
 
 
 def tr_team(name):
-    return TR_COUNTRIES.get((name or "").strip(), name or "?")
+    return TR_COUNTRIES.get((name or "").strip(), (name or "?").strip())
 
 
 def event_dt(e):
-    """Return a timezone-aware datetime (Turkey time) for the event, or None."""
+    """Event kickoff as Turkey-time datetime (from UTC timestamp), or None."""
     ts = e.get("strTimestamp")
     if ts:
         try:
@@ -112,11 +109,11 @@ def event_dt(e):
             return dt.astimezone(TR)
         except ValueError:
             pass
-    date, t = e.get("dateEvent"), e.get("strTime") or "00:00:00"
+    date, t = e.get("dateEvent"), (e.get("strTime") or "00:00:00")
     if date:
         try:
-            dt = datetime.fromisoformat(f"{date}T{t[:8]}").replace(tzinfo=timezone.utc)
-            return dt.astimezone(TR)
+            return datetime.fromisoformat(f"{date}T{t[:8]}").replace(
+                tzinfo=timezone.utc).astimezone(TR)
         except ValueError:
             return None
     return None
@@ -137,94 +134,71 @@ def round_label(e):
     return "Maç"
 
 
-def is_live(status):
-    return status not in FINISHED and status not in NOT_STARTED
+def curated_round(info):
+    """Round label from an existing curated row's info (before the ' · ')."""
+    return (info or "").split(" · ", 1)[0].strip()
 
 
-def transform(e):
-    """One API event -> our {home, away, score, info} dict (+ sort key)."""
-    status = e.get("strStatus")
+def scored(e):
     hs, as_ = e.get("intHomeScore"), e.get("intAwayScore")
-    played = hs is not None and as_ is not None
-    dt = event_dt(e)
-    rnd = round_label(e)
-
-    if played:
-        score = f"{hs} - {as_}"
-    else:
-        score = "–"
-
-    if is_live(status):
-        prog = (e.get("strProgress") or "").strip()
-        info = f"{rnd} · {prog}" if prog else f"{rnd} · CANLI"
-    elif played:
-        info = f"{rnd} · {dt.day} {TR_MONTHS[dt.month]}" if dt else rnd
-    else:  # upcoming
-        info = (f"{rnd} · {dt.day} {TR_MONTHS[dt.month]} {dt:%H:%M}"
-                if dt else rnd)
-
-    return {
-        "_dt": dt,
-        "_live": is_live(status),
-        "_played": played,
-        "_round": rnd,
-        "home": tr_team(e.get("strHomeTeam")),
-        "away": tr_team(e.get("strAwayTeam")),
-        "score": score,
-        "info": info,
-    }
+    return (hs, as_) if (hs is not None and as_ is not None) else None
 
 
-def build_feed():
-    past = (fetch(f"eventspastleague.php?id={LEAGUE_ID}").get("events") or [])
-    nxt = (fetch(f"eventsnextleague.php?id={LEAGUE_ID}").get("events") or [])
+# ----------------------------------------------------------------------------
+# Merge
+# ----------------------------------------------------------------------------
+def merge(feed, past, nxt):
+    """Mutate feed in place from API events. Return a list of change-log lines."""
+    log = []
+    fwd = {(m["home"], m["away"]): m for m in feed["matches"]}
+    rev = {(m["away"], m["home"]): m for m in feed["matches"]}
 
-    seen, rows = set(), []
-    for e in past + nxt:
-        eid = e.get("idEvent")
-        if eid in seen:
+    # PAST results -> fill the score of the matching curated row.
+    for e in past:
+        sc = scored(e)
+        if not sc:
             continue
-        seen.add(eid)
-        rows.append(transform(e))
+        hs, as_ = sc
+        h, a = tr_team(e.get("strHomeTeam")), tr_team(e.get("strAwayTeam"))
+        if (h, a) in fwd:
+            row, new = fwd[(h, a)], f"{hs} - {as_}"
+        elif (h, a) in rev:                       # listed in opposite order
+            row, new = rev[(h, a)], f"{as_} - {hs}"
+        else:
+            log.append(f"past {h}-{a} {hs}-{as_}: bracket'te yok, atlandı")
+            continue
+        if row["score"] != new:
+            log.append(f"fill {row['home']}-{row['away']}: '{row['score']}' -> '{new}'")
+            row["score"] = new
+        else:
+            log.append(f"match {row['home']}-{row['away']}: skor zaten '{new}' (doğrulandı)")
 
-    far = datetime(2100, 1, 1, tzinfo=TR)
-    rows.sort(key=lambda r: r["_dt"] or far)
-
-    played = [r for r in rows if r["_played"] and not r["_live"]]
-    live = [r for r in rows if r["_live"]]
-    upcoming = [r for r in rows if not r["_played"] and not r["_live"]]
-
-    kept = played[-MAX_PAST:] + live + upcoming[:MAX_NEXT]
-
-    # "next": the current focus match — live first, else next upcoming, else last result
-    if live:
-        f = live[0]
-        nxt_text = f"{f['home']}-{f['away']} · {f['info'].split(' · ',1)[-1]}"
-    elif upcoming:
-        f = upcoming[0]
-        dt = f["_dt"]
-        when = (f"{TR_DAYS[dt.weekday()]} {dt:%H:%M}" if dt else "")
-        nxt_text = f"{f['_round']} · {when}".strip(" ·")
-    elif played:
-        f = played[-1]
-        nxt_text = f"{f['home']} {f['score']} {f['away']}"
-    else:
-        nxt_text = ""
-
-    matches = [{"home": r["home"], "away": r["away"], "score": r["score"],
-                "info": r["info"]} for r in kept]
-
-    return {
-        "league": LEAGUE_TITLE,
-        "updated": datetime.now(TR).strftime("%Y-%m-%d"),
-        "next": nxt_text,
-        "matches": matches,
-    }
+    # NEXT fixture -> refresh top-level "next" (append only if truly missing).
+    if nxt:
+        e = nxt[0]
+        h, a = tr_team(e.get("strHomeTeam")), tr_team(e.get("strAwayTeam"))
+        dt = event_dt(e)
+        if (h, a) in fwd:
+            rnd = curated_round(fwd[(h, a)]["info"])
+        elif (h, a) in rev:
+            rnd = curated_round(rev[(h, a)]["info"])
+        else:
+            rnd = round_label(e)
+            info = (f"{rnd} · {dt.day} {TR_MONTHS[dt.month]} {dt:%H:%M}"
+                    if dt else rnd)
+            feed["matches"].append({"home": h, "away": a, "score": "–", "info": info})
+            log.append(f"next {h}-{a}: bracket'te yoktu, eklendi ({info})")
+        when = f"{TR_DAYS[dt.weekday()]} {dt:%H:%M}" if dt else ""
+        nt = f"{rnd} · {when}".strip(" ·")
+        if nt and feed.get("next") != nt:
+            log.append(f"next alanı: '{feed.get('next')}' -> '{nt}'")
+            feed["next"] = nt
+    return log
 
 
 def meaningful(feed):
-    """The parts we diff on (everything except the volatile 'updated' date)."""
-    return {k: feed[k] for k in ("league", "next", "matches")}
+    """Parts we diff on (everything except the volatile 'updated' date)."""
+    return {k: feed.get(k) for k in ("league", "next", "matches")}
 
 
 def git(*args):
@@ -233,35 +207,35 @@ def git(*args):
 
 
 def main():
-    feed = build_feed()
-    if not feed["matches"]:
-        raise RuntimeError("API returned zero usable matches; refusing to write.")
+    if not os.path.exists(FEED_PATH):
+        raise RuntimeError(f"{FEED_PATH} yok — merge tabanı gerekli, "
+                           "sıfırdan üretmiyorum.")
+    feed = json.load(open(FEED_PATH, encoding="utf-8"))
+    original = json.loads(json.dumps(feed))          # deep copy for diffing
+    if not feed.get("matches"):
+        raise RuntimeError("Curated bracket boş; merge tabanı geçersiz.")
 
-    old = None
-    if os.path.exists(FEED_PATH):
-        try:
-            old = json.load(open(FEED_PATH, encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            old = None
+    past = fetch(f"eventspastleague.php?id={LEAGUE_ID}").get("events") or []
+    nxt = fetch(f"eventsnextleague.php?id={LEAGUE_ID}").get("events") or []
+    for line in merge(feed, past, nxt):
+        print("  merge:", line)
 
-    if old is not None and meaningful(old) == meaningful(feed):
+    if meaningful(original) == meaningful(feed):
         print("No change; feed already up to date.")
         return 0
 
-    # atomic write (temp + rename) so a crash can't leave a half file
+    feed["updated"] = datetime.now(TR).strftime("%Y-%m-%d")
     tmp = FEED_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(feed, f, ensure_ascii=False, indent=2)
         f.write("\n")
     os.replace(tmp, FEED_PATH)
-    print(f"Feed updated: {len(feed['matches'])} matches, next='{feed['next']}'")
+    print(f"Feed merged: {len(feed['matches'])} matches, next='{feed['next']}'")
 
     git("add", "data/worldcup.json")
-    # Guard: if the staged content matches HEAD there is nothing to commit
-    # (e.g. the on-disk file drifted but regenerates to the committed state).
     if subprocess.run(["git", "-C", REPO, "diff", "--cached", "--quiet",
                        "--", "data/worldcup.json"]).returncode == 0:
-        print("Regenerated feed already matches HEAD; nothing to commit.")
+        print("Merged feed already matches HEAD; nothing to commit.")
         return 0
     stamp = datetime.now(TR).strftime("%Y-%m-%d %H:%M")
     git("commit", "-m", f"Auto feed update {stamp}")
